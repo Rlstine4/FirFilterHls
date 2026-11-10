@@ -2,70 +2,54 @@
 
 #include <ap_fixed.h>
 #include <hls_stream.h>
-#include "CircularBuffer.hpp"
+#include "ShiftRegister.hpp"
 
 #ifndef NUM_TAPS
-#define NUM_TAPS 8
+#define NUM_TAPS 6
 #endif
 
-#ifndef SSR
-#define SSR 4
-#endif
-
-#ifndef NUM_BEATS
-#define NUM_BEATS 128
+#ifndef NUM_SAMPLES_PER_PACKET
+#define NUM_SAMPLES_PER_PACKET 4
 #endif
 
 using coeff_t = ap_fixed<16, 2>;
 using sample_val_t = ap_fixed<16, 2>;
-using acc_val_t = ap_fixed<32, 6>;
+using acc_val_t = ap_fixed<40, 12>;
 
-// Complex baseband sample: 16-bit I (real) + 16-bit Q (imag).
+// Complex sample: 16-bit I (real) + 16-bit Q (imaginary).
 struct ComplexSample {
     sample_val_t real;
     sample_val_t imag;
 };
 
-// One AXI4-Stream beat: SSR complex samples, bus width = 32 * SSR bits.
-//   SSR=1 -> 32 bit, SSR=2 -> 64 bit, SSR=4 -> 128 bit, SSR=8 -> 256 bit
+// For SSR archictectures, Sample packet can hold multiple complex samples
 struct SamplePacket {
-    ComplexSample samples[SSR];
+    ComplexSample samples[NUM_SAMPLES_PER_PACKET];
 };
 
-// AXI4-Lite shadow register map.
-// Driver protocol:
-//   1. write taps[0 .. NUM_TAPS-1]
-//   2. toggle write_config                  <- a toggle commits the new tap set
 struct FirConfig {
     coeff_t taps[NUM_TAPS];
-    bool write_config;
+    bool write_req;
+
+    FirConfig() : taps{}, write_req(false) {
+        taps[0] = coeff_t(1);
+    }
 };
 
-// Committed coefficient set used by the datapath. Kept separate from the
-// AXI4-Lite shadow registers above so in-flight samples are never filtered
-// with a half-written coefficient set.
-struct ActiveConfig {
-    coeff_t taps[NUM_TAPS];
-    bool write_config;
-};
+void save_config(const FirConfig & axi_cfg, FirConfig & active_cfg);
 
-// Copy the whole tap set out of the AXI4-Lite shadow registers in one cycle.
-void save_config(const FirConfig& axi_cfg, ActiveConfig& active_cfg);
-
-// True when the processor has toggled write_config, i.e. committed a new set.
-bool config_toggled(const FirConfig& axi_cfg, const ActiveConfig& active_cfg);
-
-// Datapath: one beat in, one beat out. No knowledge of frame or packet counts.
+// Datapath: one packet in, one packet out per clock. II = 1
 class FirFilterCore {
 private:
-    CircularBuffer<ComplexSample, NUM_TAPS> cb_;
+    ShiftRegister<ComplexSample, NUM_TAPS> sr_;
+    ComplexSample fir_apply(const ComplexSample & in_s, const FirConfig & cfg);
 
 public:
-    FirFilterCore();
-    SamplePacket process(const SamplePacket& in_pkt, const ActiveConfig& cfg);
+    FirFilterCore() = default;
+    SamplePacket process(const SamplePacket & in_pkt, const FirConfig & cfg);
 };
 
-// Top-level streaming module: free-running, one beat per clock.
-void FirFilter(hls::stream<SamplePacket>& in_stream,
-               hls::stream<SamplePacket>& out_stream,
-               const FirConfig& axi_cfg);
+// Top-level streaming module: free-running, one packet in , one packet out per clk
+void FirFilter(hls::stream<SamplePacket> & in_stream,
+               hls::stream<SamplePacket> & out_stream,
+               const FirConfig & axi_cfg);
