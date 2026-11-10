@@ -3,7 +3,10 @@
 #include <vector>
 #include "FirFilter.hpp"
 
-// Software model of the datapath: keeps history, consumes one beat at a time.
+// Testbench-only: number of clocks per phase.
+constexpr int NUM_CLOCKS = 128;
+
+// Software model of the datapath: keeps history, consumes one packet per clock.
 class GoldenFirModel {
 private:
     ComplexSample history_[NUM_TAPS];
@@ -16,9 +19,9 @@ public:
         }
     }
 
-    SamplePacket step(const SamplePacket& in_pkt, const ActiveConfig& cfg) {
+    SamplePacket step(const SamplePacket& in_pkt, const FirConfig& cfg) {
         SamplePacket out_pkt;
-        for (int s = 0; s < SSR; ++s) {
+        for (int s = 0; s < NUM_SAMPLES_PER_PACKET; ++s) {
             for (int k = NUM_TAPS - 1; k > 0; --k) {
                 history_[k] = history_[k - 1];
             }
@@ -27,29 +30,20 @@ public:
             acc_val_t acc_r = 0;
             acc_val_t acc_i = 0;
             for (int k = 0; k < NUM_TAPS; ++k) {
-                acc_val_t c = (acc_val_t)cfg.taps[k];
-                acc_r += (acc_val_t)history_[k].real * c;
-                acc_i += (acc_val_t)history_[k].imag * c;
+                coeff_t c = cfg.taps[k];
+                acc_r += history_[k].real * c;
+                acc_i += history_[k].imag * c;
             }
-            out_pkt.samples[s].real = (sample_val_t)acc_r;
-            out_pkt.samples[s].imag = (sample_val_t)acc_i;
+            out_pkt.samples[s].real = static_cast<sample_val_t>(acc_r);
+            out_pkt.samples[s].imag = static_cast<sample_val_t>(acc_i);
         }
         return out_pkt;
     }
 };
 
-static ActiveConfig committed(const FirConfig& axi_cfg) {
-    ActiveConfig active;
-    for (int k = 0; k < NUM_TAPS; ++k) {
-        active.taps[k] = axi_cfg.taps[k];
-    }
-    active.write_config = axi_cfg.write_config;
-    return active;
-}
-
-static FirConfig make_config(double scale, bool write_config) {
+static FirConfig make_config(double scale, bool write_req) {
     FirConfig cfg;
-    cfg.write_config = write_config;
+    cfg.write_req = write_req;
     for (int k = 0; k < NUM_TAPS; ++k) {
         double center = 0.5 * (NUM_TAPS - 1);
         double rel = (k - center) / (0.5 * NUM_TAPS);
@@ -62,7 +56,7 @@ static FirConfig make_config(double scale, bool write_config) {
 
 static SamplePacket make_input(int base_sample) {
     SamplePacket pkt;
-    for (int s = 0; s < SSR; ++s) {
+    for (int s = 0; s < NUM_SAMPLES_PER_PACKET; ++s) {
         int n = base_sample + s;
         double re = 0.50 * std::cos(2.0 * 3.141592653589793 * n / 16.0)
                   + 0.20 * std::sin(2.0 * 3.141592653589793 * n / 5.0);
@@ -76,31 +70,30 @@ static SamplePacket make_input(int base_sample) {
 
 static int run_phase(const char* name,
                      const FirConfig& axi_cfg,
-                     const ActiveConfig& expected,
+                     const FirConfig& expected,
                      GoldenFirModel& golden,
                      int& sample_index) {
     hls::stream<SamplePacket> in_stream;
     hls::stream<SamplePacket> out_stream;
 
-    const int beats = NUM_BEATS;
-    std::vector<SamplePacket> in_beats(beats);
-    for (int b = 0; b < beats; ++b) {
-        in_beats[b] = make_input(sample_index + b * SSR);
-        in_stream.write(in_beats[b]);
+    const int clocks = NUM_CLOCKS;
+    std::vector<SamplePacket> in_packets(clocks);
+    for (int c = 0; c < clocks; ++c) {
+        in_packets[c] = make_input(sample_index + c * NUM_SAMPLES_PER_PACKET);
+        in_stream.write(in_packets[c]);
+        FirFilter(in_stream, out_stream, axi_cfg);
     }
-    sample_index += beats * SSR;
-
-    FirFilter(in_stream, out_stream, axi_cfg);
+    sample_index += clocks * NUM_SAMPLES_PER_PACKET;
 
     int mismatches = 0;
-    for (int b = 0; b < beats; ++b) {
+    for (int c = 0; c < clocks; ++c) {
         SamplePacket hw = out_stream.read();
-        SamplePacket gold = golden.step(in_beats[b], expected);
-        for (int s = 0; s < SSR; ++s) {
+        SamplePacket gold = golden.step(in_packets[c], expected);
+        for (int s = 0; s < NUM_SAMPLES_PER_PACKET; ++s) {
             if (hw.samples[s].real != gold.samples[s].real ||
                 hw.samples[s].imag != gold.samples[s].imag) {
                 if (mismatches < 5) {
-                    std::cerr << name << ": mismatch beat " << b << " lane " << s
+                    std::cerr << name << ": mismatch clock " << c << " sample " << s
                               << " got (" << hw.samples[s].real.to_double()
                               << ", " << hw.samples[s].imag.to_double()
                               << ") expected (" << gold.samples[s].real.to_double()
@@ -112,8 +105,9 @@ static int run_phase(const char* name,
     }
 
     std::cout << name << " (NUM_TAPS=" << NUM_TAPS
-              << ", SSR=" << SSR << ", bus_bits=" << (32 * SSR)
-              << ", beats=" << beats << "): "
+              << ", NUM_SAMPLES_PER_PACKET=" << NUM_SAMPLES_PER_PACKET
+              << ", bus_bits=" << (32 * NUM_SAMPLES_PER_PACKET)
+              << ", clocks=" << clocks << "): "
               << (mismatches == 0 ? "PASS" : "FAIL") << "\n";
     return mismatches;
 }
@@ -123,28 +117,35 @@ int main() {
     int sample_index = 0;
     int total_mismatches = 0;
 
-    // write_config false: first beat always adopts the register contents.
-    FirConfig cfg_v1 = make_config(1.00, false);
-    ActiveConfig active_v1 = committed(cfg_v1);
+    // Default passthrough config on startup: taps = {1, 0, ..., 0}, write_req = false.
+    FirConfig cfg_passthrough;
 
-    // Same tap values, still no toggle: hardware must keep using v1.
+    // Taps written to AXI4-Lite without toggling write_req: hardware stays on passthrough.
+    FirConfig cfg_uncommitted = make_config(1.00, false);
+
+    // Toggle write_req (false -> true): commits v1 tap set in one clock.
+    FirConfig cfg_v1 = make_config(1.00, true);
+
+    // Taps rewritten without toggling write_req: hardware keeps using v1.
     FirConfig cfg_partial = cfg_v1;
     for (int k = 0; k < NUM_TAPS / 2; ++k) {
         cfg_partial.taps[k] = coeff_t(0.125);
     }
 
-    // Toggle write_config: the whole new tap set is committed in one cycle.
-    FirConfig cfg_v2 = make_config(0.65, true);
-    ActiveConfig active_v2 = committed(cfg_v2);
+    // Toggle write_req again (true -> false): commits v2 tap set in one clock.
+    FirConfig cfg_v2 = make_config(0.65, false);
 
-    total_mismatches += run_phase("Phase 1  adopt cfg v1 (no toggle)",
-                                  cfg_v1, active_v1, golden, sample_index);
+    total_mismatches += run_phase("Phase 1  startup passthrough (tapsrewritten, no toggle)",
+                                  cfg_uncommitted, cfg_passthrough, golden, sample_index);
 
-    total_mismatches += run_phase("Phase 2  taps rewritten, no toggle",
-                                  cfg_partial, active_v1, golden, sample_index);
+    total_mismatches += run_phase("Phase 2  write_req toggled -> cfg v1",
+                                  cfg_v1, cfg_v1, golden, sample_index);
 
-    total_mismatches += run_phase("Phase 3  write_config toggled -> cfg v2",
-                                  cfg_v2, active_v2, golden, sample_index);
+    total_mismatches += run_phase("Phase 3  taps rewritten, no toggle",
+                                  cfg_partial, cfg_v1, golden, sample_index);
+
+    total_mismatches += run_phase("Phase 4  write_req toggled -> cfg v2",
+                                  cfg_v2, cfg_v2, golden, sample_index);
 
     if (total_mismatches == 0) {
         std::cout << "OVERALL: PASS\n";
