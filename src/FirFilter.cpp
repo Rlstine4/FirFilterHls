@@ -8,7 +8,7 @@ ComplexSample FirFilterCore::fir_apply(const ComplexSample & in_s, const FirConf
     acc_val_t acc_r = 0;
     acc_val_t acc_i = 0;
 
-    for (std::size_t k = 0; k < NUM_TAPS; ++k) {
+    for (std::size_t k = 0; k < _NUM_TAPS; ++k) {
 #pragma HLS UNROLL
         ComplexSample delayed = sr_.read(k);
         coeff_t c = cfg.taps[k];
@@ -30,7 +30,7 @@ SamplePacket FirFilterCore::process(const SamplePacket & in_pkt, const FirConfig
 #pragma HLS ARRAY_PARTITION variable=in_local.samples complete dim=1
 #pragma HLS ARRAY_PARTITION variable=out_pkt.samples complete dim=1
 
-    for (std::size_t s = 0; s < NUM_SAMPLES_PER_PACKET; ++s) {
+    for (std::size_t s = 0; s < _NUM_SAMPLES_PER_PACKET; ++s) {
 #pragma HLS UNROLL
         out_pkt.samples[s] = fir_apply(in_local.samples[s], cfg);
     }
@@ -40,7 +40,7 @@ SamplePacket FirFilterCore::process(const SamplePacket & in_pkt, const FirConfig
 
 void save_config(const FirConfig & axi_cfg, FirConfig & active_cfg) {
 #pragma HLS INLINE
-    for (std::size_t k = 0; k < NUM_TAPS; ++k) {
+    for (std::size_t k = 0; k < _NUM_TAPS; ++k) {
 #pragma HLS UNROLL
         active_cfg.taps[k] = axi_cfg.taps[k];
     }

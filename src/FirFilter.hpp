@@ -12,6 +12,9 @@
 #define NUM_SAMPLES_PER_PACKET 4
 #endif
 
+static constexpr uint16_t _NUM_TAPS               = NUM_TAPS;
+static constexpr uint16_t _NUM_SAMPLES_PER_PACKET = NUM_SAMPLES_PER_PACKET;
+
 using coeff_t = ap_fixed<16, 2>;
 using sample_val_t = ap_fixed<16, 2>;
 using acc_val_t = ap_fixed<40, 12>;
@@ -24,11 +27,11 @@ struct ComplexSample {
 
 // For SSR archictectures, Sample packet can hold multiple complex samples
 struct SamplePacket {
-    ComplexSample samples[NUM_SAMPLES_PER_PACKET];
+    ComplexSample samples[_NUM_SAMPLES_PER_PACKET];
 };
 
 struct FirConfig {
-    coeff_t taps[NUM_TAPS];
+    coeff_t taps[_NUM_TAPS];
     bool write_req;
 
     FirConfig() : taps{}, write_req(false) {
@@ -41,7 +44,7 @@ void save_config(const FirConfig & axi_cfg, FirConfig & active_cfg);
 // Datapath: one packet in, one packet out per clock. II = 1
 class FirFilterCore {
 private:
-    ShiftRegister<ComplexSample, NUM_TAPS> sr_;
+    ShiftRegister<ComplexSample, _NUM_TAPS> sr_;
     ComplexSample fir_apply(const ComplexSample & in_s, const FirConfig & cfg);
 
 public:
